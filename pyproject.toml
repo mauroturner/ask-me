@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ask-me"
+version = "0.1.0"
+description = "Let an autonomous Claude Code agent reach you over Telegram: notifications and two-way decisions from your phone."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = ["mcp", "httpx"]
+
+[project.scripts]
+ask-me = "ask_me.cli:main"
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ask_me"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
