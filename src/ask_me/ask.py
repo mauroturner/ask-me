@@ -10,8 +10,9 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Literal
 
-from .channel import Channel, Incoming
+from .channel import MESSAGE_LIMIT, Channel, Incoming, truncate
 from .clock import Clock, SystemClock
+from .context import with_header
 from .inbox import Inbox, InboxEntry, Pending
 from .telegram import TelegramConflictError, TelegramError, TelegramNetworkError
 
@@ -39,15 +40,15 @@ class AskResult:
         return {"answered": False, "reason": self.reason}
 
 
-def format_question(question: str, project: str | None) -> str:
-    return f"❓ ({project}) {question}" if project else f"❓ {question}"
+def format_question(question: str, header: str | None) -> str:
+    return with_header(header, f"❓ {question}")
 
 
 def _match(
     entry: InboxEntry,
     *,
     nonce: str,
-    message_id: int,
+    message_ids: list[int],
     options: list[str],
     allow_free_text: bool,
     created_at: float,
@@ -69,10 +70,10 @@ def _match(
 
     if not allow_free_text or not incoming.text:
         return None
-    if incoming.reply_to_message_id == message_id:
+    if incoming.reply_to_message_id in message_ids:
         return incoming.text, "text"
     if incoming.reply_to_message_id is not None and any(
-        other.message_id == incoming.reply_to_message_id for other in others
+        other.owns(incoming.reply_to_message_id) for other in others
     ):
         return None  # a reply to somebody else's question
     # Plain message (or a reply to something that is not a question): newest pending question wins.
@@ -91,7 +92,7 @@ async def ask(
     *,
     allow_free_text: bool = True,
     timeout_seconds: float = 1500,
-    project: str | None = None,
+    header: str | None = None,
     clock: Clock | None = None,
     rng: random.Random | None = None,
     on_progress: ProgressCallback | None = None,
@@ -115,17 +116,18 @@ async def ask(
     nonce = secrets.token_hex(4)
     created_at = clock.now()
     deadline = created_at + timeout
-    text = format_question(question, project)
+    text = format_question(question, header)
     buttons = [(option, f"{CALLBACK_PREFIX}:{nonce}:{index}") for index, option in enumerate(options)]
-    message_id = await channel.send_message(text, buttons=buttons or None, force_reply=not buttons)
-    inbox.register(Pending(nonce, message_id, created_at, deadline, allow_free_text))
+    sent = await channel.send_parts(text, buttons=buttons or None, force_reply=not buttons)
+    message_id = sent.ids[-1]
+    inbox.register(Pending(nonce, message_id, created_at, deadline, allow_free_text, list(sent.ids)))
 
     try:
         outcome = await _wait_for_answer(
             channel,
             inbox,
             nonce=nonce,
-            message_id=message_id,
+            message_ids=sent.ids,
             options=options,
             allow_free_text=allow_free_text,
             created_at=created_at,
@@ -140,11 +142,17 @@ async def ask(
         inbox.unregister(nonce)
 
     if outcome is None:
-        await _edit_quietly(channel, message_id, f"{text}\n\n⌛ expired")
+        await _edit_quietly(channel, message_id, _with_status(sent.last_text, "⌛ expired"))
         return AskResult(answered=False, reason="timeout")
     answer, via = outcome
-    await _edit_quietly(channel, message_id, f"{text}\n\n✅ {answer}")
+    await _edit_quietly(channel, message_id, _with_status(sent.last_text, f"✅ {answer}"))
     return AskResult(answered=True, answer=answer, via=via)
+
+
+def _with_status(last_part: str, status: str) -> str:
+    """Append the status line to the last part, shortening the part so the edit still fits one message."""
+    suffix = truncate(f"\n\n{status}", MESSAGE_LIMIT // 4)
+    return truncate(last_part, MESSAGE_LIMIT - len(suffix)) + suffix
 
 
 async def _edit_quietly(channel: Channel, message_id: int, text: str) -> None:
@@ -158,7 +166,7 @@ async def _wait_for_answer(
     inbox: Inbox,
     *,
     nonce: str,
-    message_id: int,
+    message_ids: list[int],
     options: list[str],
     allow_free_text: bool,
     created_at: float,
@@ -176,7 +184,7 @@ async def _wait_for_answer(
             channel,
             inbox,
             nonce=nonce,
-            message_id=message_id,
+            message_ids=message_ids,
             options=options,
             allow_free_text=allow_free_text,
             created_at=created_at,
@@ -209,7 +217,7 @@ async def _claim_answer(
     inbox: Inbox,
     *,
     nonce: str,
-    message_id: int,
+    message_ids: list[int],
     options: list[str],
     allow_free_text: bool,
     created_at: float,
@@ -227,7 +235,7 @@ async def _claim_answer(
         matched = _match(
             entry,
             nonce=nonce,
-            message_id=message_id,
+            message_ids=message_ids,
             options=options,
             allow_free_text=allow_free_text,
             created_at=created_at,

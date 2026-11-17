@@ -19,6 +19,11 @@ def configure(config_dir: Path, fake: FakeTelegram) -> dict[str, str]:
     return {"ASK_ME_CONFIG_DIR": str(config_dir)}
 
 
+def demo_git(cwd: str, args: list[str]) -> str | None:
+    assert cwd == "/work/demo/src"
+    return "/work/demo" if args[1] == "--show-toplevel" else "feat/x"
+
+
 def server_for(env: dict[str, str], fake: FakeTelegram, clock: FakeClock):
     return build_server(
         env,
@@ -26,7 +31,8 @@ def server_for(env: dict[str, str], fake: FakeTelegram, clock: FakeClock):
         base_url="https://telegram.test",
         clock=clock,
         rng=random.Random(0),
-        project="demo",
+        cwd="/work/demo/src",
+        git=demo_git,
     )
 
 
@@ -37,13 +43,16 @@ async def test_server_lists_notify_and_ask_with_guidance(fake, clock, config_dir
     assert set(tools) == {"notify", "ask"}
     assert "notify me" in tools["notify"].description.lower()
     assert "away" in tools["ask"].description.lower()
-    assert set(tools["notify"].input_schema["properties"]) == {"message", "level"}
+    assert set(tools["notify"].input_schema["properties"]) == {"message", "level", "context"}
     assert set(tools["ask"].input_schema["properties"]) == {
         "question",
         "options",
         "allow_free_text",
         "timeout_seconds",
+        "context",
     }
+    assert "`context`" in tools["notify"].description and "`context`" in tools["ask"].description
+    assert "2–6 word label" in tools["notify"].description and "2–6 word label" in tools["ask"].description
     assert tools["notify"].input_schema["required"] == ["message"]
     assert tools["ask"].input_schema["required"] == ["question"]
 
@@ -53,7 +62,26 @@ async def test_notify_tool_sends_and_returns_sent(fake, clock, config_dir) -> No
     async with Client(server) as client:
         result = await client.call_tool("notify", {"message": "done", "level": "success"})
     assert result.content[0].text == "sent"
-    assert fake.calls_for("sendMessage")[0]["text"] == "✅ done"
+    assert fake.calls_for("sendMessage")[0]["text"] == "📁 demo · 🌿 feat/x\n✅ done"
+
+
+async def test_notify_and_ask_include_the_context_label(fake, clock, config_dir) -> None:
+    server = server_for(configure(config_dir, fake), fake, clock)
+    async with Client(server) as client:
+        await client.call_tool("notify", {"message": "done", "context": "  cache \n layer "})
+        await client.call_tool("ask", {"question": "Ship it?", "options": ["Yes"], "timeout_seconds": 30, "context": "x" * 90})
+    first, second = (call["text"] for call in fake.calls_for("sendMessage"))
+    assert first == "📁 demo · 🌿 feat/x · 📝 cache layer\nℹ️ done"
+    header, body = second.split("\n")
+    assert header == "📁 demo · 🌿 feat/x · 📝 " + "x" * 59 + "…"
+    assert body == "❓ Ship it?"
+
+
+async def test_env_project_overrides_in_the_mcp_server(fake, clock, config_dir) -> None:
+    env = {**configure(config_dir, fake), "ASK_ME_PROJECT": "label"}
+    async with Client(server_for(env, fake, clock)) as client:
+        await client.call_tool("notify", {"message": "done"})
+    assert fake.calls_for("sendMessage")[0]["text"] == "📁 label · 🌿 feat/x\nℹ️ done"
 
 
 async def test_notify_tool_reports_muted(fake, clock, config_dir) -> None:
@@ -78,7 +106,7 @@ async def test_ask_tool_returns_json_text(fake, clock, config_dir) -> None:
     async with Client(server) as client:
         result = await client.call_tool("ask", {"question": "Ship it?", "options": ["Yes", "No"]})
     assert json.loads(result.content[0].text) == {"answered": True, "answer": "Yes", "via": "button"}
-    assert fake.calls_for("sendMessage")[0]["text"] == "❓ (demo) Ship it?"
+    assert fake.calls_for("sendMessage")[0]["text"] == "📁 demo · 🌿 feat/x\n❓ Ship it?"
 
 
 async def test_ask_tool_timeout_result(fake, clock, config_dir) -> None:

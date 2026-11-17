@@ -16,7 +16,7 @@ import contextlib
 import json
 import os
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .channel import Incoming
@@ -33,6 +33,11 @@ class Pending:
     created_at: float
     expires_at: float
     allow_free_text: bool
+    # Every part of a long question; ``message_id`` is the last one (it carries the buttons).
+    message_ids: list[int] = field(default_factory=list)
+
+    def owns(self, message_id: int | None) -> bool:
+        return message_id is not None and (message_id == self.message_id or message_id in self.message_ids)
 
 
 @dataclass(frozen=True)

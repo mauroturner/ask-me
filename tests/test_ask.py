@@ -46,6 +46,80 @@ def first_message_id(fake: FakeTelegram) -> int:
     return fake.sent_ids()[0]
 
 
+async def test_question_without_a_header_is_just_the_question(fake, clock, config_dir) -> None:
+    await run_ask(fake, clock, config_dir, "Proceed?", options=["Yes"], timeout_seconds=30)
+    assert fake.calls_for("sendMessage")[0]["text"] == "❓ Proceed?"
+
+
+async def test_long_question_is_split_with_buttons_on_the_last_part_only(fake, clock, config_dir) -> None:
+    question = "q" * 5000
+
+    def script(f: FakeTelegram) -> None:
+        if f.messages and not f.script_done:
+            f.script_done = True
+            f.user_tap(f.sent_ids()[-1], 0)
+
+    fake.script_done = False
+    fake.script = script
+    result = await run_ask(fake, clock, config_dir, question, options=["Yes"], header="📁 my-app")
+    assert result["answer"] == "Yes"
+    first, second = fake.calls_for("sendMessage")
+    assert first["text"].startswith("📁 my-app\n❓ qqq") and "reply_markup" not in first
+    assert second["text"].startswith("(2/2) ") and "reply_markup" in second
+    assert all(len(call["text"]) <= 4096 for call in (first, second))
+    (edit,) = fake.calls_for("editMessageText")
+    assert edit["message_id"] == fake.sent_ids()[-1]
+    assert edit["text"] == second["text"] + "\n\n✅ Yes"
+
+
+async def test_a_reply_to_any_part_of_a_long_question_answers_it(fake, clock, config_dir) -> None:
+    def script(f: FakeTelegram) -> None:
+        if f.messages and not f.script_done:
+            f.script_done = True
+            f.user_text("use the blue one", reply_to=f.sent_ids()[0])
+
+    fake.script_done = False
+    fake.script = script
+    result = await run_ask(fake, clock, config_dir, "q" * 5000)
+    assert result == {"answered": True, "answer": "use the blue one", "via": "text"}
+    (edit,) = fake.calls_for("editMessageText")
+    assert edit["message_id"] == fake.sent_ids()[-1]
+
+
+async def test_a_reply_to_part_of_another_long_question_is_not_ours(fake, clock, config_dir) -> None:
+    inbox = Inbox(config_dir, clock)
+    now = clock.now()
+    # Another session's long question (parts 5 and 6); ours is newer and would take plain messages.
+    inbox.register(Pending("other", 6, now - 10, now + 1000, True, [5, 6]))
+
+    def script(f: FakeTelegram) -> None:
+        if f.messages and not f.script_done:
+            f.script_done = True
+            f.user_text("for the other one", reply_to=5)
+
+    fake.script_done = False
+    fake.script = script
+    result = await run_ask(fake, clock, config_dir, "Proceed?", timeout_seconds=30)
+    assert result == {"answered": False, "reason": "timeout"}
+
+
+async def test_the_answer_edit_is_shortened_to_fit_the_limit(fake, clock, config_dir) -> None:
+    # The last part is about 2.9k characters and the answer 3k, so appending it as is would not fit.
+    def script(f: FakeTelegram) -> None:
+        if f.messages and not f.script_done:
+            f.script_done = True
+            f.user_text("a" * 3000, reply_to=f.sent_ids()[-1])
+
+    fake.script_done = False
+    fake.script = script
+    await run_ask(fake, clock, config_dir, "q" * 7000, header="📁 my-app")
+    (edit,) = fake.calls_for("editMessageText")
+    assert edit["message_id"] == fake.sent_ids()[-1]
+    assert len(edit["text"]) <= 4096
+    assert edit["text"].startswith("(2/2) qqq") and "\n\n✅ aaa" in edit["text"]
+    assert edit["text"].endswith("…")
+
+
 # ---- the three ways to answer ----------------------------------------------------------------
 async def test_ask_answered_via_button(fake, clock, config_dir) -> None:
     def script(f: FakeTelegram) -> None:
@@ -55,11 +129,11 @@ async def test_ask_answered_via_button(fake, clock, config_dir) -> None:
 
     fake.script_done = False
     fake.script = script
-    result = await run_ask(fake, clock, config_dir, "Deploy now?", options=["Yes", "No"], project="my-app")
+    result = await run_ask(fake, clock, config_dir, "Deploy now?", options=["Yes", "No"], header="📁 my-app · 🌿 main")
     assert result == {"answered": True, "answer": "No", "via": "button"}
 
     (sent,) = fake.calls_for("sendMessage")
-    assert sent["text"] == "❓ (my-app) Deploy now?"
+    assert sent["text"] == "📁 my-app · 🌿 main\n❓ Deploy now?"
     keyboard = sent["reply_markup"]["inline_keyboard"]
     assert [row[0]["text"] for row in keyboard] == ["Yes", "No"]
     for row in keyboard:
@@ -68,7 +142,7 @@ async def test_ask_answered_via_button(fake, clock, config_dir) -> None:
     assert len(fake.callback_answers) == 1
     # message edited to show the answer, buttons gone
     (edit,) = fake.calls_for("editMessageText")
-    assert "✅ No" in edit["text"]
+    assert edit["text"] == "📁 my-app · 🌿 main\n❓ Deploy now?\n\n✅ No"
     assert "reply_markup" not in edit
     # registry cleaned up
     assert files(config_dir, "pending") == []
@@ -139,10 +213,10 @@ async def test_foreign_chat_cannot_answer(fake, clock, config_dir) -> None:
 
 # ---- timeout ------------------------------------------------------------------------------------
 async def test_timeout_edits_the_message_to_expired(fake, clock, config_dir) -> None:
-    result = await run_ask(fake, clock, config_dir, "Proceed?", options=["Yes", "No"], timeout_seconds=60)
+    result = await run_ask(fake, clock, config_dir, "Proceed?", options=["Yes", "No"], timeout_seconds=60, header="📁 my-app · 🌿 main")
     assert result == {"answered": False, "reason": "timeout"}
     (edit,) = fake.calls_for("editMessageText")
-    assert "⌛ expired" in edit["text"]
+    assert edit["text"] == "📁 my-app · 🌿 main\n❓ Proceed?\n\n⌛ expired"
     assert "reply_markup" not in edit
     assert clock.now() >= 1_700_000_000.0 + 60
     assert files(config_dir, "pending") == []

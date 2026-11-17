@@ -8,56 +8,54 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 from collections.abc import Mapping
 from typing import Any, TextIO
 
 import httpx
 
-from .channel import truncate
 from .config import Config, NotConfiguredError, is_muted, load_config
+from .context import GitRunner, build_header, with_header
 from .telegram import DEFAULT_BASE_URL, TelegramClient
 
-STOP_EXCERPT_LIMIT = 800
 HTTP_TIMEOUT_SECONDS = 10.0
 TOTAL_TIMEOUT_SECONDS = 20.0
-
-
-def project_name(cwd: Any) -> str | None:
-    if not isinstance(cwd, str):
-        return None
-    segments = [segment for segment in re.split(r"[\\/]", cwd) if segment]
-    return segments[-1] if segments else None
 
 
 def _text(value: Any) -> str | None:
     return value if isinstance(value, str) and value.strip() else None
 
 
-def format_hook_message(payload: Mapping[str, Any], config: Config) -> str | None:
+def format_hook_message(
+    payload: Mapping[str, Any],
+    config: Config,
+    env: Mapping[str, str] | None = None,
+    git: GitRunner | None = None,
+) -> str | None:
     """Return the text to send, or None when this event should be skipped."""
     event = payload.get("hook_event_name")
     if not isinstance(event, str) or event not in config.hook_events:
         return None
-    project = project_name(payload.get("cwd"))
-    where = f" ({project})" if project else ""
+
+    def with_context(body: str) -> str:
+        header = build_header(payload.get("cwd"), env, session=payload.get("session_id"), git=git)
+        return with_header(header, body)
 
     if event == "Notification":
         if config.notification_types is not None and payload.get("notification_type") not in config.notification_types:
             return None
         message = _text(payload.get("message"))
-        return f"🔔 Claude needs you{where}" + (f": {message}" if message else "")
+        return with_context("🔔 Claude needs you" + (f": {message}" if message else ""))
 
     if event == "Stop":
         if payload.get("stop_hook_active") is True:
             return None
-        text = f"✅ Claude finished{where}"
+        text = "✅ Claude finished"
         last = _text(payload.get("last_assistant_message"))
         if last:
-            text += "\n\n" + truncate(last.strip(), STOP_EXCERPT_LIMIT)
-        return text
+            text += "\n\n" + last.strip()
+        return with_context(text)
 
-    return f"🔔 Claude event {event}{where}"
+    return with_context(f"🔔 Claude event {event}")
 
 
 async def _send(text: str, config: Config, transport: httpx.AsyncBaseTransport | None, base_url: str) -> None:
@@ -67,6 +65,7 @@ async def _send(text: str, config: Config, transport: httpx.AsyncBaseTransport |
         base_url=base_url,
         transport=transport,
         timeout=HTTP_TIMEOUT_SECONDS,
+        max_parts=config.max_message_parts,
     ) as client:
         await client.send_message(text)
 
@@ -79,6 +78,7 @@ def run_hook(
     transport: httpx.AsyncBaseTransport | None = None,
     base_url: str = DEFAULT_BASE_URL,
     total_timeout: float = TOTAL_TIMEOUT_SECONDS,
+    git: GitRunner | None = None,
 ) -> int:
     """Process one hook invocation. Returns the exit code, which is always 0."""
     try:
@@ -89,7 +89,7 @@ def run_hook(
         config = load_config(env)
         if is_muted(env):
             return 0
-        text = format_hook_message(payload, config)
+        text = format_hook_message(payload, config, env, git)
         if text is None:
             return 0
 

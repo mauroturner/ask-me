@@ -11,7 +11,7 @@ import pytest
 from fakes import FakeTelegram
 
 from ask_me.config import set_muted
-from ask_me.hook import STOP_EXCERPT_LIMIT, run_hook
+from ask_me.hook import run_hook
 
 BASE_URL = "https://telegram.test"
 
@@ -22,10 +22,10 @@ def configure(config_dir: Path, fake: FakeTelegram, **extra) -> dict[str, str]:
     return {"ASK_ME_CONFIG_DIR": str(config_dir)}
 
 
-def hook(env: dict[str, str], payload: object, fake: FakeTelegram) -> tuple[int, str]:
+def hook(env: dict[str, str], payload: object, fake: FakeTelegram, git=None) -> tuple[int, str]:
     stderr = io.StringIO()
     raw = payload if isinstance(payload, str) else json.dumps(payload)
-    code = run_hook(raw, env, stderr, transport=fake.transport, base_url=BASE_URL)
+    code = run_hook(raw, env, stderr, transport=fake.transport, base_url=BASE_URL, git=git)
     return code, stderr.getvalue()
 
 
@@ -46,13 +46,13 @@ def test_notification_event_is_formatted_with_project_name(fake, config_dir) -> 
         fake,
     )
     assert code == 0
-    assert sent_texts(fake) == ["🔔 Claude needs you (cool-app): Claude needs your permission to use Bash"]
+    assert sent_texts(fake) == ["📁 cool-app\n🔔 Claude needs you: Claude needs your permission to use Bash"]
 
 
 def test_windows_cwd_uses_the_last_path_segment(fake, config_dir) -> None:
     env = configure(config_dir, fake)
     hook(env, {"hook_event_name": "Notification", "message": "hi", "cwd": "C:\\Users\\me\\proj\\"}, fake)
-    assert sent_texts(fake) == ["🔔 Claude needs you (proj): hi"]
+    assert sent_texts(fake) == ["📁 proj\n🔔 Claude needs you: hi"]
 
 
 def test_stop_event_includes_an_excerpt_of_the_last_assistant_message(fake, config_dir) -> None:
@@ -67,23 +67,74 @@ def test_stop_event_includes_an_excerpt_of_the_last_assistant_message(fake, conf
         },
         fake,
     )
-    assert sent_texts(fake) == ["✅ Claude finished (api)\n\nAll tests pass. Refactor done."]
+    assert sent_texts(fake) == ["📁 api\n✅ Claude finished\n\nAll tests pass. Refactor done."]
 
 
-def test_stop_excerpt_is_capped_at_800_chars(fake, config_dir) -> None:
+def test_header_has_project_branch_and_session_from_git(fake, config_dir) -> None:
     env = configure(config_dir, fake)
-    hook(env, {"hook_event_name": "Stop", "cwd": "/work/api", "last_assistant_message": "w" * 3000}, fake)
+
+    def git(cwd: str, args: list[str]) -> str | None:
+        assert cwd == "/work/api/src"
+        return {"--show-toplevel": "/work/api", "--abbrev-ref": "main"}[args[1]]
+
+    payload = {"hook_event_name": "Stop", "cwd": "/work/api/src", "session_id": "a1b2c3d4-e5f6"}
+    hook(env, payload, fake, git=git)
+    assert sent_texts(fake) == ["📁 api · 🌿 main · 🧵 a1b2c3\n✅ Claude finished"]
+
+
+def test_other_events_carry_the_header_too(fake, config_dir) -> None:
+    env = configure(config_dir, fake, hooks={"events": ["SubagentStop"]})
+    hook(env, {"hook_event_name": "SubagentStop", "cwd": "/work/api", "session_id": "zzzzzzzz"}, fake)
+    assert sent_texts(fake) == ["📁 api · 🧵 zzzzzz\n🔔 Claude event SubagentStop"]
+
+
+@pytest.mark.parametrize("session_id", [None, "", 7, ["x"]])
+def test_session_part_needs_a_non_empty_string(fake, config_dir, session_id) -> None:
+    env = configure(config_dir, fake)
+    hook(env, {"hook_event_name": "Stop", "cwd": "/work/api", "session_id": session_id}, fake)
+    assert sent_texts(fake) == ["📁 api\n✅ Claude finished"]
+
+
+def test_env_project_overrides_in_the_hook(fake, config_dir) -> None:
+    env = {**configure(config_dir, fake), "ASK_ME_PROJECT": "my-label"}
+    hook(env, {"hook_event_name": "Stop", "cwd": "/work/api"}, fake)
+    assert sent_texts(fake) == ["📁 my-label\n✅ Claude finished"]
+
+
+def test_a_crashing_git_runner_never_breaks_the_hook(fake, config_dir) -> None:
+    env = configure(config_dir, fake)
+
+    def boom(cwd: str, args: list[str]) -> str | None:
+        raise RuntimeError("git exploded")
+
+    code, _ = hook(env, {"hook_event_name": "Stop", "cwd": "/work/api"}, fake, git=boom)
+    assert code == 0
+    assert sent_texts(fake) == ["📁 api\n✅ Claude finished"]
+
+
+def test_stop_sends_the_full_last_message_when_it_is_long(fake, config_dir) -> None:
+    env = configure(config_dir, fake)
+    last = "\n\n".join(f"section {i} " + "w" * 1000 for i in range(6))  # about 6k chars
+    hook(env, {"hook_event_name": "Stop", "cwd": "/work/api", "last_assistant_message": last}, fake)
+    first, second = sent_texts(fake)
+    assert len(first) <= 4096 and len(second) <= 4096
+    assert first.startswith("📁 api\n✅ Claude finished\n\nsection 0 ")
+    assert second.startswith("(2/2) ") and "📁" not in second
+    prefix = "📁 api\n✅ Claude finished\n\n"
+    assert first[len(prefix) :] + second[len("(2/2) ") :] == last
+
+
+def test_stop_message_is_capped_by_max_message_parts(fake, config_dir) -> None:
+    env = configure(config_dir, fake, maxMessageParts=1)
+    hook(env, {"hook_event_name": "Stop", "cwd": "/work/api", "last_assistant_message": "w" * 9000}, fake)
     (text,) = sent_texts(fake)
-    header, excerpt = text.split("\n\n", 1)
-    assert header == "✅ Claude finished (api)"
-    assert len(excerpt) == STOP_EXCERPT_LIMIT == 800
-    assert excerpt.endswith("…")
+    assert len(text) <= 4096 and "… (truncated, " in text
 
 
 def test_stop_without_last_assistant_message_sends_only_the_header(fake, config_dir) -> None:
     env = configure(config_dir, fake)
     hook(env, {"hook_event_name": "Stop", "cwd": "/work/api"}, fake)
-    assert sent_texts(fake) == ["✅ Claude finished (api)"]
+    assert sent_texts(fake) == ["📁 api\n✅ Claude finished"]
 
 
 def test_missing_fields_never_crash(fake, config_dir) -> None:
@@ -107,7 +158,7 @@ def test_notification_types_allow_list_filters_notifications(fake, config_dir) -
 def test_stop_ignores_the_notification_types_filter(fake, config_dir) -> None:
     env = configure(config_dir, fake, hooks={"notificationTypes": ["permission_prompt"]})
     hook(env, {"hook_event_name": "Stop", "cwd": "/a/b"}, fake)
-    assert sent_texts(fake) == ["✅ Claude finished (b)"]
+    assert sent_texts(fake) == ["📁 b\n✅ Claude finished"]
 
 
 def test_stop_hook_active_is_skipped(fake, config_dir) -> None:
