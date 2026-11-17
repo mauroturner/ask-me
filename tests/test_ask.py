@@ -35,8 +35,11 @@ async def run_ask(fake: FakeTelegram, clock: FakeClock, config_dir: Path, questi
 
 
 def files(config_dir: Path, sub: str) -> list[str]:
+    """Unconsumed state files; ``*.lock`` claim markers are kept on purpose until pruned."""
     folder = config_dir / sub
-    return sorted(p.name for p in folder.iterdir()) if folder.exists() else []
+    if not folder.exists():
+        return []
+    return sorted(p.name for p in folder.iterdir() if p.suffix != ".lock")
 
 
 def first_message_id(fake: FakeTelegram) -> int:

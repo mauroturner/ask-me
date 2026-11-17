@@ -6,8 +6,8 @@ Layout under ``<configDir>``::
     inbox/<update_id>.json every update from the configured chat, written by whoever polled it
     state/offset           last confirmed ``getUpdates`` offset
 
-Every write is atomic (temp file + ``os.replace``). An answer is claimed with ``os.rename`` to a
-unique name: exactly one process wins, the others see ``FileNotFoundError``.
+Every write is atomic (temp file + ``os.replace``). An answer is claimed by exclusively creating
+``inbox/<update_id>.json.lock`` (``O_CREAT | O_EXCL``): exactly one process wins.
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ import contextlib
 import json
 import os
 import time
-import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -114,26 +113,41 @@ class Inbox:
                 with contextlib.suppress(OSError):
                     path.unlink()  # writes are atomic, so a half-written file means corruption
                 continue
+            if self._lock_path(path).exists():
+                continue  # already claimed; the winner removes the entry
             found.append(InboxEntry(incoming.update_id, path, incoming))
         found.sort(key=lambda entry: entry.update_id)
         return found
 
     def claim(self, entry: InboxEntry) -> bool:
-        """Atomically take ownership of an inbox entry. True for exactly one caller."""
-        claimed = entry.path.with_name(f"{entry.path.name}.claimed-{uuid.uuid4().hex}")
+        """Atomically take ownership of an inbox entry. True for exactly one caller.
+
+        Exclusive creation of ``<entry>.lock`` is the claim: ``O_CREAT | O_EXCL`` succeeds for one
+        caller only, on every platform. (``os.rename`` is not enough on Windows: callers that opened
+        the file before the first rename can all rename it successfully.) The lock outlives the entry,
+        so a late redelivery of the same update can never be claimed twice; ``prune`` removes it.
+        """
+        lock = self._lock_path(entry.path)
         try:
-            os.rename(entry.path, claimed)
-        except FileNotFoundError:
-            return False  # another process claimed it
-        except PermissionError:
-            return False  # Windows: someone has it open; the caller retries on its next scan
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            return False  # another caller claimed it
+        except OSError:
+            return False  # transient (e.g. Windows sharing violation); retried on the next scan
+        os.close(fd)
+        if not entry.path.exists():
+            return False  # consumed before we got here (lock left by a pruned winner)
         with contextlib.suppress(OSError):
-            claimed.unlink()
+            entry.path.unlink()
         return True
+
+    @staticmethod
+    def _lock_path(path: Path) -> Path:
+        return path.with_name(f"{path.name}.lock")
 
     # ---- housekeeping -------------------------------------------------------------------
     def prune(self) -> None:
-        """Drop inbox entries older than 24 h, expired pending files and leftover claimed files."""
+        """Drop inbox entries older than 24 h, expired pending files and claim locks older than 24 h."""
         now = self._clock.now()
         for path in self._json_files(self.inbox_dir):
             try:
@@ -153,7 +167,7 @@ class Inbox:
                     path.unlink()
         real_now = time.time()
         if self.inbox_dir.is_dir():
-            for path in self.inbox_dir.glob("*.claimed-*"):
+            for path in self.inbox_dir.glob("*.lock"):
                 with contextlib.suppress(OSError):
                     if real_now - path.stat().st_mtime > MAX_AGE_SECONDS:
                         path.unlink()
