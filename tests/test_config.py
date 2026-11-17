@@ -18,6 +18,18 @@ def env_for(config_dir: Path, **extra: str) -> dict[str, str]:
     return {"ASK_ME_CONFIG_DIR": str(config_dir), **extra}
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(None, 5), (1, 1), (8, 8), (0, 5), (-2, 5), ("3", 5), (True, 5), (2.5, 5)],
+)
+def test_max_message_parts(config_dir: Path, value, expected: int) -> None:
+    data: dict = {"telegram": {"botToken": "1:abc", "chatId": 42}}
+    if value is not None:
+        data["maxMessageParts"] = value
+    write_config(config_dir, data)
+    assert load_config(env_for(config_dir)).max_message_parts == expected
+
+
 def test_config_dir_comes_from_env(config_dir: Path) -> None:
     assert resolve_config_dir(env_for(config_dir)) == config_dir
 

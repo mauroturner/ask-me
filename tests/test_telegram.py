@@ -35,13 +35,33 @@ async def test_send_message_is_plain_text_to_the_configured_chat(fake, clock) ->
     assert message_id in fake.messages
 
 
-async def test_long_text_is_truncated_to_4096_chars_with_ellipsis(fake, clock) -> None:
+async def test_long_text_is_split_into_consecutive_messages(fake, clock) -> None:
     async with make_client(fake, clock) as client:
-        await client.send_message("x" * 5000)
-    (payload,) = fake.calls_for("sendMessage")
-    assert len(payload["text"]) == 4096
-    assert payload["text"].endswith("…")
-    assert payload["text"][:-1] == "x" * 4095
+        message_id = await client.send_message("x" * 5000)
+    first, second = fake.calls_for("sendMessage")
+    assert len(first["text"]) <= 4096 and len(second["text"]) <= 4096
+    assert second["text"].startswith("(2/2) ")
+    assert first["text"] + second["text"][len("(2/2) ") :] == "x" * 5000
+    assert message_id == fake.sent_ids()[-1]
+
+
+async def test_max_parts_caps_the_number_of_messages(fake, clock) -> None:
+    async with make_client(fake, clock, max_parts=2) as client:
+        await client.send_message("x" * 20000)
+    texts = [call["text"] for call in fake.calls_for("sendMessage")]
+    assert len(texts) == 2
+    assert texts[1].endswith(" more characters)") and "(truncated, " in texts[1]
+
+
+async def test_buttons_and_force_reply_go_on_the_last_part_only(fake, clock) -> None:
+    async with make_client(fake, clock) as client:
+        sent = await client.send_parts("x" * 9000, buttons=[("Yes", "am:n:0")])
+        await client.send_parts("y" * 9000, force_reply=True)
+    calls = fake.calls_for("sendMessage")
+    assert [("reply_markup" in call) for call in calls] == [False, False, True, False, False, True]
+    assert calls[2]["reply_markup"]["inline_keyboard"][0][0]["text"] == "Yes"
+    assert calls[5]["reply_markup"] == {"force_reply": True}
+    assert len(sent.ids) == 3 and sent.last_text == calls[2]["text"]
 
 
 async def test_text_at_the_limit_is_not_truncated(fake, clock) -> None:

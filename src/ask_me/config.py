@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .channel import DEFAULT_MAX_MESSAGE_PARTS
 from .fsutil import atomic_write_text
 
 NOT_CONFIGURED_MESSAGE = "ask-me is not configured. Run: ask-me setup"
@@ -35,6 +36,7 @@ class Config:
     ask_timeout_seconds: int = DEFAULT_ASK_TIMEOUT_SECONDS
     hook_events: tuple[str, ...] = DEFAULT_HOOK_EVENTS
     notification_types: tuple[str, ...] | None = None
+    max_message_parts: int = DEFAULT_MAX_MESSAGE_PARTS
 
 
 def _env(env: Mapping[str, str] | None) -> Mapping[str, str]:
@@ -84,12 +86,16 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
     timeout = data.get("askTimeoutSeconds")
     if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
         timeout = DEFAULT_ASK_TIMEOUT_SECONDS
+    max_parts = data.get("maxMessageParts")
+    if not isinstance(max_parts, int) or isinstance(max_parts, bool) or max_parts < 1:
+        max_parts = DEFAULT_MAX_MESSAGE_PARTS
     return Config(
         bot_token=str(token),
         chat_id=str(chat_id),
         ask_timeout_seconds=timeout,
         hook_events=_string_tuple(hooks.get("events")) or DEFAULT_HOOK_EVENTS,
         notification_types=_string_tuple(hooks.get("notificationTypes")),
+        max_message_parts=max_parts,
     )
 
 

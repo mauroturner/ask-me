@@ -7,6 +7,7 @@ from typing import Literal
 
 from .channel import Channel
 from .config import is_muted
+from .context import with_header
 
 LEVEL_PREFIXES = {
     "info": "ℹ️",
@@ -28,9 +29,10 @@ async def notify(
     message: str,
     level: str = "info",
     env: Mapping[str, str] | None = None,
+    header: str | None = None,
 ) -> Literal["sent", "muted"]:
     """Send ``message`` unless muted. Muting never affects ``ask``."""
-    text = format_notification(message, level)
+    text = with_header(header, format_notification(message, level))
     if is_muted(env):
         return "muted"
     await channel.send_message(text)

@@ -55,12 +55,47 @@ def test_unknown_subcommand_is_a_usage_error(config_dir) -> None:
     assert err
 
 
+def no_git(cwd: str, args: list[str]) -> str | None:
+    return None
+
+
 def test_notify_sends_with_level(fake, config_dir) -> None:
     configure(config_dir, fake)
-    code, out, _ = run(["notify", "deploy finished", "--level", "important"], config_dir, fake)
+    code, out, _ = run(["notify", "deploy finished", "--level", "important"], config_dir, fake, cwd="/w/api", git=no_git)
     assert code == 0
     assert out.strip() == "sent"
-    assert fake.calls_for("sendMessage")[0]["text"] == "🚨 deploy finished"
+    assert fake.calls_for("sendMessage")[0]["text"] == "📁 api\n🚨 deploy finished"
+
+
+def test_notify_header_uses_the_working_directory_and_context(fake, config_dir) -> None:
+    configure(config_dir, fake)
+
+    def git(cwd: str, args: list[str]) -> str | None:
+        assert cwd == "/work/repo/src"
+        return "/work/repo" if args[1] == "--show-toplevel" else "feat/x"
+
+    code, out, _ = run(
+        ["notify", "Build done", "--level", "success", "--context", "cache  layer"],
+        config_dir,
+        fake,
+        cwd="/work/repo/src",
+        git=git,
+    )
+    assert code == 0 and out.strip() == "sent"
+    assert fake.calls_for("sendMessage")[0]["text"] == "📁 repo · 🌿 feat/x · 📝 cache layer\n✅ Build done"
+
+
+def test_notify_env_project_overrides_the_repo_name(fake, config_dir) -> None:
+    configure(config_dir, fake)
+    run(["notify", "hi"], config_dir, fake, cwd="/work/repo", git=no_git, env={"ASK_ME_PROJECT": "custom"})
+    assert fake.calls_for("sendMessage")[0]["text"] == "📁 custom\nℹ️ hi"
+
+
+def test_notify_help_mentions_context(config_dir) -> None:
+    _, out, _ = run(["help"], config_dir)
+    assert "--context" in out
+    code, out, _ = run(["notify", "--help"], config_dir)
+    assert code == 0 and "--context" in out
 
 
 def test_notify_when_muted_sends_nothing(fake, config_dir) -> None:
@@ -133,7 +168,7 @@ def test_hook_subcommand_never_writes_stdout_and_exits_0(fake, config_dir) -> No
     )
     assert code == 0
     assert out.getvalue() == ""
-    assert fake.calls_for("sendMessage")[0]["text"] == "✅ Claude finished (proj)"
+    assert fake.calls_for("sendMessage")[0]["text"] == "📁 proj\n✅ Claude finished"
 
 
 def test_hook_survives_bogus_extra_arguments(config_dir) -> None:

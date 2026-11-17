@@ -22,6 +22,7 @@ from .config import (
     mask_token,
     set_muted,
 )
+from .context import GitRunner, build_header
 from .hook import run_hook
 from .notify import LEVELS, notify
 from .setup_wizard import run_setup
@@ -32,7 +33,7 @@ TEST_MESSAGE = "ask-me is working ✅"
 COMMANDS: dict[str, str] = {
     "setup": "interactive wizard: connect a Telegram bot and capture your chat id",
     "test": "send a test message to check the connection",
-    "notify": "send a one-way message: ask-me notify \"<text>\" [--level info|success|warning|important]",
+    "notify": "send a one-way message: ask-me notify \"<text>\" [--level info|success|warning|important] [--context <label>]",
     "hook": "Claude Code hook entry point (reads the hook JSON on stdin; always exits 0)",
     "mcp": "run the MCP server over stdio (tools: notify, ask)",
     "mute": "stop notify and hooks from sending (ask still works)",
@@ -57,6 +58,10 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "notify":
             command.add_argument("text", help="message to send")
             command.add_argument("--level", choices=LEVELS, default="info", help="importance (default: info)")
+            command.add_argument(
+                "--context",
+                help="short label of what you are working on, shown in the message header (max 60 characters)",
+            )
     return parser
 
 
@@ -79,6 +84,8 @@ def main(
     base_url: str = DEFAULT_BASE_URL,
     read_token: Callable[[str], str] = getpass.getpass,
     clock: Clock | None = None,
+    git: GitRunner | None = None,
+    cwd: str | None = None,
 ) -> int:
     args_list = list(sys.argv[1:] if argv is None else argv)
     env = os.environ if env is None else env
@@ -92,7 +99,7 @@ def main(
         except Exception as exc:
             print(f"ask-me hook: could not read stdin: {exc}", file=err)
             return 0
-        return run_hook(raw, env, err, transport=transport, base_url=base_url)
+        return run_hook(raw, env, err, transport=transport, base_url=base_url, git=git)
 
     parser = build_parser()
     try:
@@ -123,7 +130,7 @@ def main(
         return asyncio.run(
             run_setup(env, read_token=read_token, stdout=out, stderr=err, transport=transport, base_url=base_url, clock=clock)
         )
-    return asyncio.run(_send_command(args, env, out, err, transport, base_url, clock))
+    return asyncio.run(_send_command(args, env, out, err, transport, base_url, clock, git, cwd))
 
 
 def _status(env: Mapping[str, str], out: TextIO) -> int:
@@ -148,6 +155,8 @@ async def _send_command(
     transport: httpx.AsyncBaseTransport | None,
     base_url: str,
     clock: Clock | None,
+    git: GitRunner | None,
+    cwd: str | None,
 ) -> int:
     try:
         config = load_config(env)
@@ -160,6 +169,7 @@ async def _send_command(
         base_url=base_url,
         transport=transport,
         sleep=clock.sleep if clock else asyncio.sleep,
+        max_parts=config.max_message_parts,
     )
     try:
         async with client:
@@ -167,7 +177,8 @@ async def _send_command(
                 await client.send_message(TEST_MESSAGE)
                 print("test message sent", file=out)
             else:
-                print(await notify(client, args.text, args.level, env), file=out)
+                header = build_header(cwd if cwd is not None else os.getcwd(), env, context=args.context, git=git)
+                print(await notify(client, args.text, args.level, env, header), file=out)
     except TelegramError as exc:
         print(f"ask-me: {exc}", file=err)
         return 1

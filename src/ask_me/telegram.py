@@ -9,10 +9,17 @@ from typing import Any
 
 import httpx
 
-from .channel import Incoming, PollResult, truncate
+from .channel import (
+    DEFAULT_MAX_MESSAGE_PARTS,
+    MESSAGE_LIMIT,
+    Incoming,
+    PollResult,
+    SentMessage,
+    split_message,
+    truncate,
+)
 
 DEFAULT_BASE_URL = "https://api.telegram.org"
-MESSAGE_LIMIT = 4096
 MAX_RATE_LIMIT_RETRIES = 3
 POLL_ALLOWED_UPDATES = ["message", "callback_query"]
 
@@ -91,7 +98,9 @@ class TelegramClient:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         timeout: float = 30.0,
         max_retries: int = MAX_RATE_LIMIT_RETRIES,
+        max_parts: int = DEFAULT_MAX_MESSAGE_PARTS,
     ) -> None:
+        self._max_parts = max(1, max_parts)
         self._token = token
         self._chat_id = chat_id
         self._base_url = base_url.rstrip("/")
@@ -180,16 +189,33 @@ class TelegramClient:
         buttons: Sequence[tuple[str, str]] | None = None,
         force_reply: bool = False,
     ) -> int:
-        payload: dict[str, Any] = {"chat_id": self._require_chat(), "text": truncate(text, MESSAGE_LIMIT)}
-        # A message carries a single reply_markup, so buttons and force_reply are exclusive.
-        if buttons:
-            payload["reply_markup"] = {
-                "inline_keyboard": [[{"text": label, "callback_data": data}] for label, data in buttons]
-            }
-        elif force_reply:
-            payload["reply_markup"] = {"force_reply": True}
-        result = await self._call("sendMessage", payload)
-        return int(result["message_id"])
+        """Send ``text`` (split when long). Returns the id of the last part."""
+        sent = await self.send_parts(text, buttons=buttons, force_reply=force_reply)
+        return sent.ids[-1]
+
+    async def send_parts(
+        self,
+        text: str,
+        *,
+        buttons: Sequence[tuple[str, str]] | None = None,
+        force_reply: bool = False,
+    ) -> SentMessage:
+        chat_id = self._require_chat()
+        parts = split_message(text, MESSAGE_LIMIT, self._max_parts)
+        ids: list[int] = []
+        for index, part in enumerate(parts):
+            payload: dict[str, Any] = {"chat_id": chat_id, "text": part}
+            if index == len(parts) - 1:
+                # A message carries a single reply_markup, so buttons and force_reply are exclusive.
+                if buttons:
+                    payload["reply_markup"] = {
+                        "inline_keyboard": [[{"text": label, "callback_data": data}] for label, data in buttons]
+                    }
+                elif force_reply:
+                    payload["reply_markup"] = {"force_reply": True}
+            result = await self._call("sendMessage", payload)
+            ids.append(int(result["message_id"]))
+        return SentMessage(ids=ids, last_text=parts[-1])
 
     async def edit_message_text(self, message_id: int, text: str) -> None:
         # Omitting reply_markup removes the inline keyboard.

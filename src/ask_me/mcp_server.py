@@ -14,7 +14,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from .ask import ask as run_ask
 from .clock import Clock, SystemClock
 from .config import Config, NotConfiguredError, load_config, resolve_config_dir
-from .hook import project_name
+from .context import GitRunner, build_header
 from .inbox import Inbox
 from .notify import LEVELS
 from .notify import notify as run_notify
@@ -25,8 +25,9 @@ NOTIFY_DESCRIPTION = (
     'notified ("notify me when you finish", "avisame cuando termines", "let me know when it is done") '
     'or when something is important enough that they should know right away ("this is important"). '
     "Do not use it for routine progress chatter. It does not wait for a reply: use `ask` when you need "
-    "a decision. level is one of info (default), success, warning, important. Returns 'sent', or "
-    "'muted' when the user muted notifications."
+    "a decision. level is one of info (default), success, warning, important. "
+    "Set `context` to a 2–6 word label of the task you are working on (e.g. \"refactor auth\"), so the "
+    "user can tell parallel sessions apart. Returns 'sent', or 'muted' when the user muted notifications."
 )
 
 ASK_DESCRIPTION = (
@@ -36,7 +37,9 @@ ASK_DESCRIPTION = (
     "each; free-text replies are also accepted unless allow_free_text is false. Blocks until the user "
     "answers or timeout_seconds passes (default from config, max 86400). Returns JSON text: "
     '{"answered": true, "answer": "...", "via": "button"|"text"} or {"answered": false, "reason": "timeout"}. '
-    "If it times out, pick the safest reversible choice or stop and wait; do not assume consent."
+    "If it times out, pick the safest reversible choice or stop and wait; do not assume consent. "
+    "Set `context` to a 2–6 word label of the task you are working on (e.g. \"refactor auth\"), so the "
+    "user can tell parallel sessions apart."
 )
 
 
@@ -47,13 +50,17 @@ def build_server(
     base_url: str = DEFAULT_BASE_URL,
     clock: Clock | None = None,
     rng: random.Random | None = None,
-    project: str | None = None,
+    cwd: str | None = None,
+    git: GitRunner | None = None,
 ) -> MCPServer:
     clock = clock or SystemClock()
     server = MCPServer(
         "ask-me",
         instructions="Reach the user on their phone: `notify` to tell them something, `ask` to get a decision.",
     )
+
+    def header_for(context: str | None) -> str | None:
+        return build_header(cwd if cwd is not None else os.getcwd(), env, context=context, git=git)
 
     def make_client() -> tuple[TelegramClient, Config]:
         try:
@@ -66,17 +73,18 @@ def build_server(
             base_url=base_url,
             transport=transport,
             sleep=clock.sleep,
+            max_parts=config.max_message_parts,
         )
         return client, config
 
     @server.tool(name="notify", description=NOTIFY_DESCRIPTION)
-    async def notify(message: str, level: str = "info") -> str:
+    async def notify(message: str, level: str = "info", context: str | None = None) -> str:
         if level not in LEVELS:
             raise ToolError(f"level must be one of: {', '.join(LEVELS)}")
         client, _config = make_client()
         try:
             async with client:
-                return await run_notify(client, message, level, env)
+                return await run_notify(client, message, level, env, header_for(context))
         except TelegramError as exc:
             raise ToolError(str(exc)) from None
 
@@ -87,6 +95,7 @@ def build_server(
         options: list[str] | None = None,
         allow_free_text: bool = True,
         timeout_seconds: int | None = None,
+        context: str | None = None,
     ) -> str:
         client, config = make_client()
         timeout = timeout_seconds if timeout_seconds is not None else config.ask_timeout_seconds
@@ -104,7 +113,7 @@ def build_server(
                     options,
                     allow_free_text=allow_free_text,
                     timeout_seconds=timeout,
-                    project=project if project is not None else project_name(os.getcwd()),
+                    header=header_for(context),
                     clock=clock,
                     rng=rng,
                     on_progress=report,
