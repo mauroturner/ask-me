@@ -210,6 +210,8 @@ Yes. Run `ask-me mute` to silence `notify` and hooks. `ask` still works, so a bl
 - One chat per installation.
 - Uses long polling, not webhooks.
 - Not published to PyPI yet. Install from the repository.
+- If a Claude session is killed while an `ask` is waiting, its question stays "pending" until its timeout. Until then, plain (non-reply) messages go to that dead question. Reply to the specific message to target a live one.
+- Tapping a button on a question that already expired does nothing (Telegram may show a loading spinner briefly).
 
 ## Contributing
 
