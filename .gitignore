@@ -1,0 +1,31 @@
+# Dependencies & build output
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Secrets — never commit tokens or chat ids
+.env
+.env.*
+!.env.example
+config.json
+*.local.json
+.ask-me/
+secrets/
+
+# Runtime state
+inbox/
+*.lock
+*.log
+npm-debug.log*
+
+# Local agent / tooling state
+.codegraph/
+.claude/settings.local.json
+.atl/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
