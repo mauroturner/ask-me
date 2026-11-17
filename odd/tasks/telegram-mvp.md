@@ -72,7 +72,8 @@ Config precedence & missing-config error; truncation; 429 retry; foreign chat ig
 - [x] T2 — S5: ask + shared inbox + tests — delegated (Sonnet writer) — Risk: item 4 (concurrency) — commit `6553cb0` (verification pending T5)
 - [x] T3 — S6, S7, S8, S3: MCP server, hook, CLI, setup + tests — delegated (Sonnet writer) — commit `02f0a29`
 - [x] T4 — S9: README + docs — delegated (Haiku drafter, user request) — commit `8e91ca3`; `.env.example` left uncommitted (agent cannot read `.env*`; user commits it)
-- [ ] T5 — verification of T2 concurrency (independent verifier, Risk item 4)
+- [x] T5 — verification of T2 concurrency (independent verifier, Risk item 4) — blocker fixed in `fe77a65`, recheck FIXED; regression tests `173838f`
+- [ ] T6 — native review of the concurrency scope (full branch exceeded the review context budget; needs a reduced candidate)
 
 ## Log
 - L1 (2026-11-17, user request, verbatim):
@@ -88,4 +89,6 @@ Config precedence & missing-config error; truncation; 429 retry; foreign chat ig
 - L9: Writer result: `uv run pytest -q` 104 passed, 1 skipped (POSIX 0600 test on Windows); parent spot check identical. Accepted deviations: installed `mcp` is 2.3.0 → `mcp.server.mcpserver.MCPServer` (no `fastmcp`); edited messages keep the question and append `✅ <answer>` / `⌛ expired`; plain messages older than the question (−5 s) are ignored; a 409 mentioning "webhook" is a hard error; >10 options rejected. Open: small stale-offset race (mitigated), callbacks on expired questions are not answered. `.gitignore` gets `!uv.lock`.
 - L10: Native assess `a8146d0..HEAD` (committed-only, untracked excluded): risk medium, review_due false (under_budget). T2 to be escalated as item 4 after T5.
 - L11: T5 independent verifier (Sonnet, scratch clone): S0–S2, S4, S7, S8, S10 PASS; S3/S6/S9 not checked (need live bot). BLOCKER: `Inbox.claim` via `os.rename` not exclusive on Windows (2–16 winners in stress). Fix `fe77a65`: exclusive `O_CREAT|O_EXCL` lock file kept until prune; RED observed on old code (3 winners, redelivery double-claim), GREEN 107 passed 1 skipped. Advisories documented in README Limitations, not fixed: dead pending file captures plain text until its timeout; stale callbacks not acknowledged; offset read-then-write may regress (store skips < offset).
+- L12: Native review of `a8146d0..173838f` (escalated item 4, lenses risk/resilience/reliability): user granted consent; START stopped with `lens_context_budget_exceeded` (34 files / 4820 lines, mostly `uv.lock`); no authority created. Next: reduce scope (e.g. concurrency fix range) and start a new transaction. Regression suite: 118 passed, 1 skipped.
+- L13: Live end-to-end with the user's real bot: `ask-me setup` (token OK, /start captured, config saved under the user's home), `ask-me test` → "test message sent", `ask-me notify --level success` → `sent`, live `ask` with two buttons → `{"answered": true, "answer": "Yes, push it", "via": "button"}`. S3, S6 (ask/notify core) and S8 verified live. Branch pushed.
 - L3: Delivery `exception-ok`: forecast ~1800 authored lines, greenfield repo with no remote, so no PR chain; work-unit commits on `feat/telegram-mvp`.
